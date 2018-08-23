@@ -1,6 +1,12 @@
 # -*- coding: utf8 -*-
-import datetime
+import json
+import socket
+from collections import OrderedDict
+from time import sleep
+
 import requests
+
+from config import logger
 
 
 class HTTPClient(object):
@@ -10,45 +16,133 @@ class HTTPClient(object):
         :param method:
         :param headers: Must be a dict. Such as headers={'Content_Type':'text/html'}
         """
-        self.session = requests.session()
-        self._set_header()
+        self.initS()
+        self._cdn = None
+
+    def initS(self):
+        self._s = requests.Session()
+        self._s.headers.update(self._set_header())
+        return self
+
+    def set_cookies(self, **kwargs):
+        """
+        设置cookies
+        :param kwargs:
+        :return:
+        """
+        for k, v in kwargs.items():
+            self._s.cookies.set(k, v)
+
+    def del_cookies(self):
+        """
+        删除所有的key
+        :return:
+        """
+        self._s.cookies.clear()
+
+    def del_cookies_by_key(self, key):
+        """
+        删除指定key的session
+        :return:
+        """
+        self._s.cookies.set(key, None)
 
     def _set_header(self):
         """设置header"""
-        add_header = {
-            "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
-            "X-Requested-With": "xmlHttpRequest",
-            "User-Agent": "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/33.0.1750.154 Safari/537.36",
-            "Referer": "https://kyfw.12306.cn/otn/login/init",
-            "Accept": "*/*",
-        }
-        self.session.headers.update(add_header)
+        header_dict = OrderedDict()
+        header_dict["Host"] = "kyfw.12306.cn"
+        header_dict["keep-alive"] = "keep-alive"
+        header_dict["Accept"] = "application/json, text/plain, */*"
+        header_dict[
+            "User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_4) AppleWebKit/537.36 (KHTML, like Gecko) 12306-electron/1.0.1 Chrome/59.0.3071.115 Electron/1.8.4 Safari/537.36"
+        header_dict["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
+        header_dict["Accept-Encoding"] = "gzip, deflate"
+        header_dict["Accept-Language"] = "zh-CN"
+        return header_dict
 
-    def get(self, url, proxy=None, **kwargs):
-        if proxy:
-            proxies = {"http": proxy}
-        else:
-            proxies = ""
-        response = self.session.request(method="GET",
-                                        url=url,
-                                        proxies=proxies,
-                                        **kwargs)
-        if response.status_code == 200:
-            return response.content
-        else:
-            print("请求失败。{0}".format(response))
+    def setHeaders(self, headers):
+        self._s.headers.update(headers)
+        return self
 
-    def post(self, url, data=None, proxy=None, **kwargs):
-        if proxy:
-            proxies = {"http": proxy}
+    def resetHeaders(self):
+        self._s.headers.clear()
+        self._s.headers.update(self._set_header())
+
+    def getHeadersHost(self):
+        return self._s.headers["Host"]
+
+    def setHeadersHost(self, host):
+        self._s.headers.update({"Host": host})
+        return self
+
+    def getHeadersReferer(self):
+        return self._s.headers["Referer"]
+
+    def setHeadersReferer(self, referer):
+        self._s.headers.update({"Referer": referer})
+        return self
+
+    @property
+    def cdn(self):
+        return self._cdn
+
+    @cdn.setter
+    def cdn(self, cdn):
+        self._cdn = cdn
+
+    # def send_socket(self, urls, data=None, **kwargs):
+    #     data = """
+    #         POST {0} HTTP/1.1
+    #         {0}
+    #         """.format(urls["req_url"], self._set_header())
+    #     fack = socket.create_connection(urls["Host"], 443)
+    #     fack.send()
+
+    def send(self, urls, data=None, **kwargs):
+        """send request to url.If response 200,return response, else return None."""
+        allow_redirects = False
+        is_logger = urls["is_logger"]
+        error_data = {"code": 99999, "message": u"重试次数达到上限"}
+        if data:
+            method = "post"
+            self.setHeaders({"Content-Length": "{0}".format(len(data))})
         else:
-            proxies = ""
-        response = self.session.request(method="POST",
-                                        url=url,
-                                        data=data,
-                                        proxies=proxies,
-                                        **kwargs)
-        if response.status_code == 200:
-            return response.content
+            method = "get"
+            self.resetHeaders()
+        if is_logger:
+            logger.log(
+                u"url: {0}\n入参: {1}\n请求方式: {2}\n".format(urls["req_url"],data,method,))
+        self.setHeadersHost(urls["Host"])
+        if self.cdn:
+            url_host = self.cdn
         else:
-            print("请求失败。{0}".format(response))
+            url_host = urls["Host"]
+        for i in range(urls["re_try"]):
+            try:
+                # sleep(urls["s_time"]) if "s_time" in urls else sleep(0.001)
+                sleep(urls.get("s_time", 0.001))
+                requests.packages.urllib3.disable_warnings()
+                response = self._s.request(method=method,
+                                           timeout=2,
+                                           url="https://" + url_host + urls["req_url"],
+                                           data=data,
+                                           allow_redirects=allow_redirects,
+                                           verify=False,
+                                           **kwargs)
+                if response.status_code == 200:
+                    if response.content:
+                        if is_logger:
+                            logger.log(
+                                u"出参：{0}".format(response.content))
+                        return json.loads(response.content) if method == "post" else response.content
+                    else:
+                        logger.log(
+                            u"url: {} 返回参数为空".format(urls["req_url"]))
+                        return error_data
+                else:
+                    sleep(urls["re_time"])
+            except (requests.exceptions.Timeout, requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError):
+                pass
+            except socket.error:
+                pass
+        return error_data
